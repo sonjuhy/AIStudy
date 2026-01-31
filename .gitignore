@@ -176,3 +176,6 @@ pyrightconfig.json
 # dataset
 datasets/
 # End of https://www.toptal.com/developers/gitignore/api/python
+
+__*
+.vscode
