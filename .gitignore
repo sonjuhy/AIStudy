@@ -179,3 +179,7 @@ datasets/
 
 __*
 .vscode
+
+models/
+checkpoint*
+*weights*
