@@ -183,3 +183,5 @@ __*
 models/
 checkpoint*
 *weights*
+merged_model/
+models.zip
