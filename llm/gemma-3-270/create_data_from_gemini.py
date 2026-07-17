@@ -74,10 +74,10 @@ def save_to_jsonl(raw_json_string):
                 jsonl_line = json.dumps({"text": gemma_format}, ensure_ascii=False)
                 f.write(jsonl_line + "\n")
                 
-        print(f"✅ 성공적으로 {len(data_list)}개의 데이터를 {OUTPUT_FILE}에 추가했습니다.")
+        print(f" 성공적으로 {len(data_list)}개의 데이터를 {OUTPUT_FILE}에 추가했습니다.")
         
     except json.JSONDecodeError as e:
-        print(f"❌ JSON 파싱 에러 발생: {e}")
+        print(f" JSON 파싱 에러 발생: {e}")
         print("Gemini 응답 원본:\n", raw_json_string)
 
 # 실행 부 (예: 10개씩 5번 반복하여 총 50개 생성 테스트)
