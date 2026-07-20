@@ -1,0 +1,20 @@
+# Gemma-3-270M LoRA 파인튜닝 환경 (Windows + GTX 1660 Super, CUDA)
+#
+# torch는 PyPI 기본 배포판이 CUDA를 포함하고 있어 별도 --index-url 없이 설치 가능합니다.
+# 만약 `torch.cuda.is_available()`가 False로 나오면 설치된 NVIDIA 드라이버가 지원하는
+# CUDA 버전에 맞춰 아래처럼 재설치하세요 (예: 드라이버가 오래된 경우 cu121):
+#   pip install torch==2.9.1 --index-url https://download.pytorch.org/whl/cu121
+
+torch==2.9.1
+transformers==4.57.5
+tokenizers==0.22.2
+trl==0.28.0
+peft>=0.15.0
+accelerate>=1.0.0
+datasets==4.5.0
+huggingface_hub>=0.26.0
+safetensors>=0.4.5
+
+# Gemini API 기반 학습 데이터 생성 스크립트(create_data_*.py)용
+google-genai>=0.3.0
+python-dotenv>=1.0.0
