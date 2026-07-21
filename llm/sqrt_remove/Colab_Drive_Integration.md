@@ -50,8 +50,18 @@ drive.mount('/content/drive')
 
 ```python
 # Cell 3: 코드 가져오기 (git clone 권장 — 파일 업로드보다 세션마다 반복하기 편함)
-!git clone <레포 URL> repo
-%cd repo/llm/sqrt_remove
+import os
+
+# 이 셀은 몇 번을 다시 실행해도 안전하다: 이미 clone되어 있으면 pull만 한다.
+# %cd에 상대 경로("repo/...")를 쓰면 이미 이동한 상태에서 이 셀을 다시 실행할 때
+# 그 안에 또 clone하고 또 들어가면서 경로가 계속 중첩되므로(repo/llm/sqrt_remove/repo/...),
+# 반드시 절대 경로(/content/repo/...)만 쓴다.
+if os.path.isdir("/content/repo/.git"):
+    !git -C /content/repo pull
+else:
+    !git clone <레포 URL> /content/repo
+
+%cd /content/repo/llm/sqrt_remove
 !pip install -q -r requirements.txt
 ```
 
