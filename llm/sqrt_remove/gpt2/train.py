@@ -55,8 +55,24 @@ def save_checkpoint(
     )
 
 
-def load_checkpoint(path: Path, model: GPT, optimizer: torch.optim.Optimizer, device: str) -> int:
+def load_checkpoint(
+    path: Path,
+    model: GPT,
+    optimizer: torch.optim.Optimizer,
+    device: str,
+    config: GPTConfig | None = None,
+) -> int:
     ckpt = torch.load(path, map_location=device)
+    ckpt_config = ckpt.get("config")
+    if config is not None and ckpt_config is not None and ckpt_config != asdict(config):
+        raise ValueError(
+            "체크포인트의 모델 설정이 현재 실행 설정과 다릅니다 (다른 실험 단계의 체크포인트를 "
+            "잘못 재사용하려는 경우 흔히 발생합니다 — 예: 파이프라인 검증용 소형 모델과 본 실험용 "
+            "GPT-2 small이 같은 --ckpt-dir을 공유한 경우).\n"
+            f"  체크포인트 config: {ckpt_config}\n"
+            f"  현재 config:       {asdict(config)}\n"
+            "실험 단계별로 --ckpt-dir을 분리하거나, --resume 없이 새로 시작하세요."
+        )
     model.load_state_dict(ckpt["model"])
     optimizer.load_state_dict(ckpt["optimizer"])
     return ckpt["step"]
@@ -126,7 +142,7 @@ def main(argv: list[str] | None = None) -> None:
     ckpt_path = Path(args.ckpt_dir) / args.attention_type / "latest.pt"
     start_step = 0
     if args.resume and ckpt_path.exists():
-        start_step = load_checkpoint(ckpt_path, model, optimizer, device) + 1
+        start_step = load_checkpoint(ckpt_path, model, optimizer, device, config) + 1
         print(f"resumed from step {start_step}")
 
     log_file = None

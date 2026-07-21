@@ -37,6 +37,25 @@ def test_checkpoint_roundtrip(tmp_path: Path) -> None:
         assert torch.equal(p1, p2)
 
 
+def test_load_checkpoint_rejects_mismatched_config(tmp_path: Path) -> None:
+    """서로 다른 실험 단계(예: 파이프라인 검증용 소형 모델 vs 본 실험용 GPT-2 small)의
+    체크포인트를 같은 --ckpt-dir로 잘못 재사용하면, PyTorch의 난해한 shape 에러 대신
+    바로 원인을 알 수 있는 명확한 에러를 내야 한다."""
+    small_config = GPTConfig(n_layer=1, n_head=1, n_embd=8, block_size=8, vocab_size=50, attention_type="softmax")
+    small_model = GPT(small_config)
+    small_optimizer = torch.optim.AdamW(small_model.parameters(), lr=1e-3)
+
+    ckpt_path = tmp_path / "ckpt.pt"
+    train_module.save_checkpoint(ckpt_path, small_model, small_optimizer, step=3, config=small_config)
+
+    big_config = GPTConfig(n_layer=2, n_head=2, n_embd=16, block_size=8, vocab_size=50, attention_type="softmax")
+    big_model = GPT(big_config)
+    big_optimizer = torch.optim.AdamW(big_model.parameters(), lr=1e-3)
+
+    with pytest.raises(ValueError, match="체크포인트의 모델 설정이 현재 실행 설정과 다릅니다"):
+        train_module.load_checkpoint(ckpt_path, big_model, big_optimizer, device="cpu", config=big_config)
+
+
 def test_main_runs_end_to_end_with_synthetic_data(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

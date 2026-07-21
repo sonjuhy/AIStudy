@@ -21,6 +21,15 @@ Google Drive에 마운트된 경로라 세션이 끊겨도 유지된다. 따라�
 | `--ckpt-dir` | 모델/옵티마이저 체크포인트 | 세션 끊김 후 `--resume`으로 이어서 학습 |
 | `--log-path` | 스텝별 CSV 로그 | 세션이 여러 번 끊겨도 학습 기록이 하나로 이어짐 |
 
+> **주의**: `--ckpt-dir`은 `{ckpt-dir}/{attention-type}/latest.pt`로 저장되므로, **모델
+> 규모(n_layer/n_embd 등)가 다른 실행끼리 같은 --ckpt-dir을 공유하면 안 된다.** 예를 들어
+> 가이드 1단계(파이프라인 검증, 소형 모델)와 2단계(본 실험, GPT-2 small)를 같은 디렉터리에
+> 저장하면, 2단계에서 `--resume`이 1단계의 작은 체크포인트를 불러오려다 `size mismatch`
+> 에러로 실패한다. 단계별로 `checkpoints/pipeline_check/`, `checkpoints/main/`처럼 하위
+> 디렉터리를 분리하자 (아래 예시와 `notebooks/colab_experiment.ipynb`에 이미 반영됨).
+> 설정이 다른 체크포인트를 실수로 불러오면 `train.py`가 shape 에러 대신 어떤 config가
+> 충돌했는지 알려주는 명확한 에러를 낸다.
+
 ---
 
 ## 1. Drive 마운트 및 코드 준비
