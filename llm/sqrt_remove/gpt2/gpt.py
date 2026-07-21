@@ -5,6 +5,7 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.utils.checkpoint as checkpoint_util
 
 from gpt2.attention.linear_attention import LinearAttention
 from gpt2.attention.softmax_attention import SoftmaxAttention
@@ -48,6 +49,9 @@ class GPT(nn.Module):
     def __init__(self, config: GPTConfig) -> None:
         super().__init__()
         self.config = config
+        # 학습 중 활성화 메모리를 줄이기 위한 옵션 (아키텍처와 무관하므로 GPTConfig에는
+        # 넣지 않는다 — 체크포인트 config 일치 검사에 걸리면 안 되기 때문).
+        self.gradient_checkpointing = False
 
         self.wte = nn.Embedding(config.vocab_size, config.n_embd)
         self.wpe = nn.Embedding(config.block_size, config.n_embd)
@@ -82,7 +86,10 @@ class GPT(nn.Module):
         pos = torch.arange(seq_len, device=idx.device)
         x = self.wte(idx) + self.wpe(pos)
         for block in self.blocks:
-            x = block(x)
+            if self.gradient_checkpointing and self.training:
+                x = checkpoint_util.checkpoint(block, x, use_reentrant=False)
+            else:
+                x = block(x)
         x = self.ln_f(x)
         logits = self.lm_head(x)
 

@@ -28,13 +28,21 @@ def build_lr_lambda(warmup_steps: int, max_steps: int, min_lr_ratio: float):
 
 @torch.no_grad()
 def estimate_val_loss(
-    model: GPT, val_bin: Path, batch_size: int, block_size: int, device: str, eval_iters: int = 50
+    model: GPT,
+    val_bin: Path,
+    batch_size: int,
+    block_size: int,
+    device: str,
+    eval_iters: int = 50,
+    use_amp: bool = False,
+    amp_dtype: torch.dtype = torch.float16,
 ) -> float:
     model.eval()
     losses = torch.zeros(eval_iters)
     for i in range(eval_iters):
         x, y = get_batch(val_bin, batch_size, block_size, device)
-        _, loss = model(x, targets=y)
+        with torch.autocast(device_type=device, dtype=amp_dtype, enabled=use_amp):
+            _, loss = model(x, targets=y)
         losses[i] = loss.item()
     model.train()
     return losses.mean().item()
@@ -93,6 +101,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--min-lr-ratio", type=float, default=0.1)
     parser.add_argument("--weight-decay", type=float, default=0.1)
     parser.add_argument("--grad-clip", type=float, default=1.0)
+    parser.add_argument(
+        "--grad-accum-steps",
+        type=int,
+        default=1,
+        help="이만큼의 micro-batch를 누적한 뒤 한 번 optimizer.step() — batch-size를 줄이고 "
+        "이 값을 늘리면 유효 batch size는 유지하면서 GPU 메모리 사용량을 줄일 수 있다",
+    )
+    parser.add_argument(
+        "--no-amp",
+        action="store_true",
+        help="CUDA에서 기본으로 켜지는 mixed precision(bf16/fp16)을 끄고 fp32로 학습",
+    )
+    parser.add_argument(
+        "--grad-checkpointing",
+        action="store_true",
+        help="블록마다 forward를 다시 계산해 활성화 메모리를 줄인다 (속도는 느려짐, block_size가 "
+        "클 때 OOM 방지용)",
+    )
     parser.add_argument("--eval-interval", type=int, default=200)
     parser.add_argument("--eval-iters", type=int, default=50)
     parser.add_argument("--ckpt-interval", type=int, default=200)
@@ -132,12 +158,21 @@ def main(argv: list[str] | None = None) -> None:
         attention_type=args.attention_type,
     )
     model = GPT(config).to(device)
+    model.gradient_checkpointing = args.grad_checkpointing
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=args.lr, betas=(0.9, 0.95), weight_decay=args.weight_decay
     )
     scheduler = torch.optim.lr_scheduler.LambdaLR(
         optimizer, build_lr_lambda(args.warmup_steps, args.max_steps, args.min_lr_ratio)
     )
+
+    use_amp = device == "cuda" and not args.no_amp
+    amp_dtype = torch.bfloat16 if (use_amp and torch.cuda.is_bf16_supported()) else torch.float16
+    scaler = torch.amp.GradScaler(device="cuda", enabled=use_amp and amp_dtype == torch.float16)
+    if use_amp:
+        print(f"mixed precision: {amp_dtype}")
+    if args.grad_checkpointing:
+        print("gradient checkpointing: on")
 
     ckpt_path = Path(args.ckpt_dir) / args.attention_type / "latest.pt"
     start_step = 0
@@ -157,13 +192,20 @@ def main(argv: list[str] | None = None) -> None:
     model.train()
     t0 = time.perf_counter()
     for step in range(start_step, args.max_steps):
-        x, y = get_batch(paths["train"], args.batch_size, args.block_size, device)
-
         optimizer.zero_grad(set_to_none=True)
-        _, loss = model(x, targets=y)
-        loss.backward()
+        loss_accum = 0.0
+        for _ in range(args.grad_accum_steps):
+            x, y = get_batch(paths["train"], args.batch_size, args.block_size, device)
+            with torch.autocast(device_type=device, dtype=amp_dtype, enabled=use_amp):
+                _, micro_loss = model(x, targets=y)
+            micro_loss = micro_loss / args.grad_accum_steps
+            scaler.scale(micro_loss).backward()
+            loss_accum += micro_loss.item()
+
+        scaler.unscale_(optimizer)
         torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
-        optimizer.step()
+        scaler.step(optimizer)
+        scaler.update()
         scheduler.step()
 
         is_last_step = step == args.max_steps - 1
@@ -172,17 +214,18 @@ def main(argv: list[str] | None = None) -> None:
 
         if step % args.eval_interval == 0 or is_last_step:
             val_loss = estimate_val_loss(
-                model, paths["val"], args.batch_size, args.block_size, device, args.eval_iters
+                model, paths["val"], args.batch_size, args.block_size, device, args.eval_iters,
+                use_amp=use_amp, amp_dtype=amp_dtype,
             )
             elapsed = time.perf_counter() - t0
             val_ppl = math.exp(val_loss)
             print(
-                f"step {step} (epoch {epoch}): train_loss={loss.item():.4f} val_loss={val_loss:.4f} "
+                f"step {step} (epoch {epoch}): train_loss={loss_accum:.4f} val_loss={val_loss:.4f} "
                 f"val_ppl={val_ppl:.2f} elapsed={elapsed:.1f}s"
             )
             if log_file:
                 log_file.write(
-                    f"{step},{args.attention_type},{loss.item():.6f},{val_loss:.6f},"
+                    f"{step},{args.attention_type},{loss_accum:.6f},{val_loss:.6f},"
                     f"{val_ppl:.6f},{elapsed:.3f}\n"
                 )
                 log_file.flush()

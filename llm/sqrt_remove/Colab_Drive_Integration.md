@@ -77,7 +77,7 @@ LOG_DIR = f"{DRIVE_ROOT}/logs"
   --attention-type softmax \
   --dataset tiny_shakespeare \
   --n-layer 12 --n-head 12 --n-embd 768 --block-size 512 \
-  --batch-size 16 --max-steps 5000 \
+  --batch-size 8 --grad-accum-steps 2 --max-steps 5000 \
   --eval-interval 200 --ckpt-interval 200 \
   --save-every-epoch \
   --cache-dir "{CACHE_DIR}" \
@@ -90,6 +90,10 @@ LOG_DIR = f"{DRIVE_ROOT}/logs"
   `checkpoints/softmax/epoch_N.pt`를 덮어쓰지 않고 누적 저장한다.
 - `--resume`: `checkpoints/softmax/latest.pt`가 있으면 그 지점(step)부터 자동으로 이어서 학습한다.
   **매번 이 플래그를 켜두면, 세션이 언제 끊기든 같은 셀을 다시 실행하는 것만으로 재개된다.**
+- `--batch-size 8 --grad-accum-steps 2`: micro-batch 8을 2번 누적해 optimizer.step() 1번 —
+  유효 batch size(=16)는 유지하면서 한 번에 GPU에 올라가는 activation 메모리는 절반으로 줄인다.
+  mixed precision(bf16/fp16)은 CUDA에서 자동으로 켜지며, 이 둘만으로 대부분의 `CUDA out of
+  memory`는 해결된다. 그래도 부족하면 `--grad-checkpointing`을 추가한다 (아래 5장 참고).
 
 같은 세션에서 이어서 linear attention도 연달아 실행한다 (GPU 배정 편차 최소화, 가이드 4장 참고):
 
@@ -99,7 +103,7 @@ LOG_DIR = f"{DRIVE_ROOT}/logs"
   --attention-type linear \
   --dataset tiny_shakespeare \
   --n-layer 12 --n-head 12 --n-embd 768 --block-size 512 \
-  --batch-size 16 --max-steps 5000 \
+  --batch-size 8 --grad-accum-steps 2 --max-steps 5000 \
   --eval-interval 200 --ckpt-interval 200 \
   --save-every-epoch \
   --cache-dir "{CACHE_DIR}" \
@@ -136,16 +140,39 @@ LOG_DIR = f"{DRIVE_ROOT}/logs"
   --n-layer 12 --n-head 12 --n-embd 768 \
   --block-sizes 256 512 1024 \
   --seeds 1337 42 7 \
-  --batch-size 16 \
+  --batch-size 8 \
   --cache-dir "{CACHE_DIR}" \
   --output "{DRIVE_ROOT}/benchmark_results.json"
 ```
 
 결과 JSON도 Drive에 저장되므로, 세션이 끊겨도 지금까지의 측정값은 안전하게 남는다.
+block_size=1024에서 `CUDA out of memory`가 나면 `--batch-size 4`로 낮추거나
+`--grad-checkpointing`을 추가한다 (아래 5장 참고).
 
 ---
 
-## 5. 결과 집계 (가이드 7장 표 자동 생성)
+## 5. 메모리 부족(OOM) 대응
+
+`train.py`와 `benchmark.py` 모두 CUDA에서는 mixed precision(T4는 fp16, bf16 지원 GPU는
+bf16)이 **기본으로 켜져** 활성화 메모리를 줄인다. 그래도 GPT-2 small 규모(12층/768차원)에서
+`torch.OutOfMemoryError: CUDA out of memory`가 나면 아래 순서로 대응한다.
+
+1. **`--batch-size`를 낮추고 `--grad-accum-steps`로 보충한다** (`train.py`만 해당).
+   예: `--batch-size 16` 대신 `--batch-size 8 --grad-accum-steps 2` — micro-batch 8을 2번
+   누적해 한 번 optimizer.step()을 밟으므로, 유효 batch size(=16)는 그대로 유지하면서
+   한 번에 GPU에 올라가는 activation 메모리만 절반이 된다. `benchmark.py`는 학습 곡선을
+   측정하는 게 아니라 순수 속도 비교라 grad-accum 없이 `--batch-size` 자체를 낮추면 된다.
+2. **그래도 부족하면 `--grad-checkpointing`을 추가한다.** 각 블록의 forward를 backward 때
+   다시 계산해서 저장해두는 activation을 줄인다 — 메모리는 더 아끼지만 그만큼 느려진다.
+   `block_size=1024`처럼 시퀀스가 긴 벤치마크에서 특히 유용하다.
+3. 그래도 안 되면 `--n-layer`/`--n-embd`/`--block-size`를 실제로 줄여서 우선 파이프라인이
+   끝까지 도는지 확인한 뒤, 단계적으로 스케일을 올린다.
+4. `--no-amp`로 mixed precision을 끄면 메모리 사용량이 다시 늘어나므로(디버깅 목적이
+   아니라면) 켜둔 상태를 유지한다.
+
+---
+
+## 6. 결과 집계 (가이드 7장 표 자동 생성)
 
 `gpt2/aggregate_results.py`가 여러 seed의 벤치마크 결과를 평균 내서, 가이드 7장의 결과
 정리 템플릿과 softmax/linear 속도·정확도 비교 표(가설 H1·H3 검증용)를 markdown으로 만든다.
@@ -169,7 +196,7 @@ with open(f"{DRIVE_ROOT}/results_table.md") as f:
 
 ---
 
-## 6. 주의사항
+## 7. 주의사항
 
 - **Drive I/O는 로컬 디스크보다 느리다.** `--ckpt-interval`을 너무 짧게(예: 10 스텝마다) 잡으면
   저장 자체가 병목이 될 수 있다. 200~500 스텝 또는 epoch 단위 저장을 기본으로 권장.

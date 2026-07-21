@@ -76,6 +76,38 @@ def test_run_single_benchmark_returns_valid_result(tmp_path: Path) -> None:
     assert result.extra["n_params"] > 0
 
 
+def test_run_single_benchmark_with_grad_checkpointing(tmp_path: Path) -> None:
+    """grad_checkpointing=True를 줘도(메모리 절약 옵션) 벤치마크가 정상적으로 끝나야 한다."""
+    val_bin = tmp_path / "val.bin"
+    _write_toy_bin(val_bin)
+
+    result = benchmark_module.run_single_benchmark(
+        "softmax",
+        n_layer=2,
+        n_head=1,
+        n_embd=8,
+        block_size=8,
+        batch_size=2,
+        val_bin=val_bin,
+        device="cpu",
+        seed=0,
+        n_warmup=1,
+        n_train_iters=2,
+        n_inference_tokens=4,
+        eval_iters=2,
+        grad_checkpointing=True,
+    )
+
+    assert result.train_step_time_sec > 0
+
+
+def test_parse_args_amp_and_checkpointing_flags_default_off() -> None:
+    args = benchmark_module.parse_args([])
+
+    assert args.no_amp is False
+    assert args.grad_checkpointing is False
+
+
 def test_main_writes_json_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     val_bin = tmp_path / "val.bin"
     train_bin = tmp_path / "train.bin"

@@ -98,6 +98,62 @@ def test_main_runs_end_to_end_with_synthetic_data(
     assert (ckpt_dir / "linear" / "latest.pt").exists()
 
 
+def test_parse_args_memory_saving_flags_default_off() -> None:
+    args = train_module.parse_args([])
+
+    assert args.grad_accum_steps == 1
+    assert args.no_amp is False
+    assert args.grad_checkpointing is False
+
+
+def _write_toy_bin_pair(bin_dir: Path, n_tokens: int = 500) -> tuple[Path, Path]:
+    bin_dir.mkdir(parents=True)
+    tokens = np.random.randint(0, 100, size=n_tokens).astype(np.uint16)
+    train_bin = bin_dir / "train.bin"
+    val_bin = bin_dir / "val.bin"
+    tokens.tofile(train_bin)
+    tokens.tofile(val_bin)
+    return train_bin, val_bin
+
+
+def test_main_runs_with_grad_accum_and_checkpointing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--grad-accum-steps와 --grad-checkpointing을 같이 켜도 학습 루프가 끝까지 돈다
+    (GPU 메모리 절약 옵션이 OOM 대응 수단으로 실제로 동작하는지 확인하는 스모크 테스트)."""
+    train_bin, val_bin = _write_toy_bin_pair(tmp_path / "cache" / "toy")
+
+    monkeypatch.setattr(
+        train_module,
+        "prepare_dataset",
+        lambda name, cache_dir: {"train": train_bin, "val": val_bin},
+    )
+
+    ckpt_dir = tmp_path / "checkpoints"
+    argv = [
+        "--attention-type", "softmax",
+        "--dataset", "toy",
+        "--n-layer", "2",
+        "--n-head", "1",
+        "--n-embd", "8",
+        "--block-size", "8",
+        "--batch-size", "2",
+        "--grad-accum-steps", "3",
+        "--grad-checkpointing",
+        "--max-steps", "2",
+        "--warmup-steps", "1",
+        "--eval-interval", "1",
+        "--eval-iters", "1",
+        "--ckpt-interval", "1",
+        "--cache-dir", str(tmp_path / "cache"),
+        "--ckpt-dir", str(ckpt_dir),
+    ]
+
+    train_module.main(argv)
+
+    assert (ckpt_dir / "softmax" / "latest.pt").exists()
+
+
 def test_main_saves_checkpoint_at_every_epoch_boundary(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

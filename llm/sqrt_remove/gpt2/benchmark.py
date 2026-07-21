@@ -26,26 +26,34 @@ class BenchmarkResult:
 
 
 def measure_train_step_time(
-    model: GPT, batch: torch.Tensor, n_warmup: int = 5, n_iters: int = 20
+    model: GPT,
+    batch: torch.Tensor,
+    n_warmup: int = 5,
+    n_iters: int = 20,
+    use_amp: bool = False,
+    amp_dtype: torch.dtype = torch.float16,
 ) -> float:
     device: torch.device = next(model.parameters()).device
     optimizer: torch.optim.Optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
+    scaler = torch.amp.GradScaler(device="cuda", enabled=use_amp and amp_dtype == torch.float16)
+
+    def step() -> None:
+        optimizer.zero_grad(set_to_none=True)
+        with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
+            _, loss = model(batch, targets=batch)
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
 
     for _ in range(n_warmup):
-        optimizer.zero_grad(set_to_none=True)
-        _, loss = model(batch, targets=batch)
-        loss.backward()
-        optimizer.step()
+        step()
 
     if device.type == "cuda":
         torch.cuda.synchronize()
 
     start: float = time.perf_counter()
     for _ in range(n_iters):
-        optimizer.zero_grad(set_to_none=True)
-        _, loss = model(batch, targets=batch)
-        loss.backward()
-        optimizer.step()
+        step()
 
     if device.type == "cuda":
         torch.cuda.synchronize()
@@ -55,12 +63,16 @@ def measure_train_step_time(
 
 
 def measure_inference_tokens_per_sec(
-    model: GPT, prompt: torch.Tensor, max_new_tokens: int = 128
+    model: GPT,
+    prompt: torch.Tensor,
+    max_new_tokens: int = 128,
+    use_amp: bool = False,
+    amp_dtype: torch.dtype = torch.float16,
 ) -> float:
     device: torch.device = next(model.parameters()).device
     model.eval()
 
-    with torch.no_grad():
+    with torch.no_grad(), torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=use_amp):
         if device.type == "cuda":
             torch.cuda.synchronize()
         start: float = time.perf_counter()
@@ -75,13 +87,21 @@ def measure_inference_tokens_per_sec(
 
 @torch.no_grad()
 def measure_val_perplexity(
-    model: GPT, val_bin: Path, batch_size: int, block_size: int, device: str, eval_iters: int = 50
+    model: GPT,
+    val_bin: Path,
+    batch_size: int,
+    block_size: int,
+    device: str,
+    eval_iters: int = 50,
+    use_amp: bool = False,
+    amp_dtype: torch.dtype = torch.float16,
 ) -> float:
     model.eval()
     losses = torch.zeros(eval_iters)
     for i in range(eval_iters):
         x, y = get_batch(val_bin, batch_size, block_size, device)
-        _, loss = model(x, targets=y)
+        with torch.autocast(device_type=device if isinstance(device, str) else device.type, dtype=amp_dtype, enabled=use_amp):
+            _, loss = model(x, targets=y)
         losses[i] = loss.item()
     model.train()
     return math.exp(losses.mean().item())
@@ -102,6 +122,9 @@ def run_single_benchmark(
     n_train_iters: int = 20,
     n_inference_tokens: int = 128,
     eval_iters: int = 50,
+    use_amp: bool = False,
+    amp_dtype: torch.dtype = torch.float16,
+    grad_checkpointing: bool = False,
 ) -> BenchmarkResult:
     """동일 세션·동일 GPU 배정 내에서 하나의 attention_type을 측정한다.
 
@@ -119,14 +142,21 @@ def run_single_benchmark(
         attention_type=attention_type,
     )
     model = GPT(config).to(device)
+    model.gradient_checkpointing = grad_checkpointing
 
     batch, _ = get_batch(val_bin, batch_size, block_size, device)
-    train_step_time = measure_train_step_time(model, batch, n_warmup=n_warmup, n_iters=n_train_iters)
+    train_step_time = measure_train_step_time(
+        model, batch, n_warmup=n_warmup, n_iters=n_train_iters, use_amp=use_amp, amp_dtype=amp_dtype
+    )
 
     prompt = batch[:1, :1]
-    inference_tps = measure_inference_tokens_per_sec(model, prompt, max_new_tokens=n_inference_tokens)
+    inference_tps = measure_inference_tokens_per_sec(
+        model, prompt, max_new_tokens=n_inference_tokens, use_amp=use_amp, amp_dtype=amp_dtype
+    )
 
-    val_ppl = measure_val_perplexity(model, val_bin, batch_size, block_size, device, eval_iters)
+    val_ppl = measure_val_perplexity(
+        model, val_bin, batch_size, block_size, device, eval_iters, use_amp=use_amp, amp_dtype=amp_dtype
+    )
 
     n_params = sum(p.numel() for p in model.parameters())
     return BenchmarkResult(
@@ -149,6 +179,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--block-sizes", type=int, nargs="+", default=[128])
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--seeds", type=int, nargs="+", default=[1337])
+    parser.add_argument(
+        "--no-amp",
+        action="store_true",
+        help="CUDA에서 기본으로 켜지는 mixed precision(bf16/fp16)을 끄고 fp32로 측정",
+    )
+    parser.add_argument(
+        "--grad-checkpointing",
+        action="store_true",
+        help="train_step_time 측정 시 gradient checkpointing을 켜서 OOM을 방지 (속도는 느려짐)",
+    )
     parser.add_argument("--cache-dir", default="data_cache")
     parser.add_argument("--output", default="benchmark_results.json")
     return parser.parse_args(argv)
@@ -159,6 +199,13 @@ def main(argv: list[str] | None = None) -> list[BenchmarkResult]:
     device = "cuda" if torch.cuda.is_available() else "cpu"
     if device == "cuda":
         print(f"GPU: {torch.cuda.get_device_name(0)}")
+
+    use_amp = device == "cuda" and not args.no_amp
+    amp_dtype = torch.bfloat16 if (use_amp and torch.cuda.is_bf16_supported()) else torch.float16
+    if use_amp:
+        print(f"mixed precision: {amp_dtype}")
+    if args.grad_checkpointing:
+        print("gradient checkpointing: on")
 
     paths = prepare_dataset(args.dataset, args.cache_dir)
 
@@ -177,6 +224,9 @@ def main(argv: list[str] | None = None) -> list[BenchmarkResult]:
                     val_bin=paths["val"],
                     device=device,
                     seed=seed,
+                    use_amp=use_amp,
+                    amp_dtype=amp_dtype,
+                    grad_checkpointing=args.grad_checkpointing,
                 )
                 print(
                     f"[{attention_type}] block_size={block_size} seed={seed} "
