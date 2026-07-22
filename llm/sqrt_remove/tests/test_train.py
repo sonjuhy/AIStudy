@@ -20,6 +20,37 @@ def test_build_lr_lambda_warmup_then_decay() -> None:
     assert lr_lambda(200) == pytest.approx(0.1, abs=1e-6)  # max_steps 이후는 min_lr_ratio 유지
 
 
+def test_epoch_progress_bar_reflects_current_epoch_and_total() -> None:
+    # steps_per_epoch=10, max_steps=25 -> epoch1=[0,9], epoch2=[10,19], epoch3=[20,24](5 step)
+    pbar = train_module.epoch_progress_bar(step=5, steps_per_epoch=10, max_steps=25, disable=False)
+    try:
+        assert pbar.total == 10
+        assert pbar.n == 5
+        assert pbar.desc == "epoch 1/3"
+    finally:
+        pbar.close()
+
+
+def test_epoch_progress_bar_last_epoch_is_shorter_when_not_evenly_divisible() -> None:
+    pbar = train_module.epoch_progress_bar(step=22, steps_per_epoch=10, max_steps=25, disable=False)
+    try:
+        assert pbar.total == 5  # 마지막 epoch은 max_steps에 걸려 5 step만 존재
+        assert pbar.n == 2  # step 22는 이 epoch의 3번째(0-indexed 2번째) step
+        assert pbar.desc == "epoch 3/3"
+    finally:
+        pbar.close()
+
+
+def test_epoch_progress_bar_reflects_resume_offset_mid_epoch() -> None:
+    # step=13에서 resume하면(=epoch2의 4번째 step), 진행바는 이미 3 step 지난 상태로 시작해야 한다.
+    pbar = train_module.epoch_progress_bar(step=13, steps_per_epoch=10, max_steps=25, disable=False)
+    try:
+        assert pbar.n == 3
+        assert pbar.desc == "epoch 2/3"
+    finally:
+        pbar.close()
+
+
 def test_checkpoint_roundtrip(tmp_path: Path) -> None:
     config = GPTConfig(n_layer=1, n_head=1, n_embd=8, block_size=8, vocab_size=50, attention_type="linear")
     model = GPT(config)

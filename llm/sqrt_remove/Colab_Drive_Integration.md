@@ -206,7 +206,29 @@ with open(f"{DRIVE_ROOT}/results_table.md") as f:
 
 ---
 
-## 7. 주의사항
+## 7. 학습 진행 상황 보기 (epoch 단위 진행바)
+
+`train.py`를 실행하면 시작할 때 먼저 이런 줄이 뜬다.
+
+```
+1 epoch ≈ 720 steps (train tokens // (batch_size*block_size)) — --max-steps 5000은 약 6.94 epoch에 해당
+```
+
+그리고 학습 중에는 `epoch 1/7`, `epoch 2/7`처럼 **epoch마다 0%로 리셋되는 진행바**가 뜨고
+(`loss`, 평가 시점엔 `val_loss`/`val_ppl`도 같이 표시), `--resume`으로 epoch 중간부터 이어받으면
+진행바도 그 지점부터 시작한다. 안 보이게 하려면(로그 파일로 리다이렉트할 때 등) `--no-progress-bar`.
+
+**주의**: WikiText-103처럼 큰 데이터셋에서는 `--max-steps`가 1 epoch(steps_per_epoch)보다
+작을 수 있다 — 이 경우 위 안내 줄에 "1 epoch보다 작아 학습 데이터 전체를 한 번도 다 보지
+않습니다"라는 경고가 함께 뜬다. **이건 버그가 아니라 정상이다.** 대규모 코퍼스로 LLM을
+사전학습할 때는 원래 여러 epoch을 돌리지 않는 경우가 많고, 이 실험(softmax vs linear 속도·
+perplexity 비교)의 목적상 전체 코퍼스를 다 훑을 필요는 없다. 전체 데이터를 여러 번 보고
+싶다면 `--max-steps`를 `steps_per_epoch`의 배수로 늘리거나, 더 작은 데이터셋
+(`tiny_shakespeare`)으로 바꾸면 된다.
+
+---
+
+## 8. 주의사항
 
 - **Drive I/O는 로컬 디스크보다 느리다.** `--ckpt-interval`을 너무 짧게(예: 10 스텝마다) 잡으면
   저장 자체가 병목이 될 수 있다. 200~500 스텝 또는 epoch 단위 저장을 기본으로 권장.
