@@ -6,10 +6,12 @@ import torch.nn.functional as F
 
 
 class LinearAttention(nn.Module):
-    """elu(x)+1 커널 기반 causal Linear Attention (chunkwise-parallel 형태).
+    """ReLU(x)+eps 커널 기반 causal Linear Attention (chunkwise-parallel 형태).
 
     Katharopoulos et al., "Transformers are RNNs" (2020)의 커널 트릭을 사용해
-    softmax(QK^T)V를 phi(Q)(phi(K)^T V) 형태로 재정렬한다 (exp/softmax 미사용).
+    softmax(QK^T)V를 phi(Q)(phi(K)^T V) 형태로 재정렬한다. feature map으로
+    elu(x)+1 대신 ReLU(x)+eps를 사용해 지수 연산(exp) 자체를 완전히 배제했다
+    (비교/포화 연산만으로 구성되어 CPU/NPU 및 양자화 추론에 더 친화적).
 
     시퀀스를 chunk_size 단위로 나눠 처리한다: chunk 내부는 작은 causal
     quadratic attention(O(chunk_size^2))으로, chunk 사이는 누적 상태
@@ -29,9 +31,8 @@ class LinearAttention(nn.Module):
         self.c_attn = nn.Linear(n_embd, 3 * n_embd)
         self.c_proj = nn.Linear(n_embd, n_embd)
 
-    @staticmethod
-    def _feature_map(x: torch.Tensor) -> torch.Tensor:
-        return F.elu(x) + 1.0
+    def _feature_map(self, x: torch.Tensor) -> torch.Tensor:
+        return F.relu(x) + self.eps
 
     def _to_heads(self, x: torch.Tensor, batch_size: int, seq_len: int) -> torch.Tensor:
         return x.view(batch_size, seq_len, self.n_head, self.head_dim).transpose(1, 2)
